@@ -228,10 +228,17 @@ class PageSearchAPIView(GenericAPIView):
             superprojects__parent_id=main_project.id,
         )
         for project in subprojects:
-            version = self._get_subproject_versions_queryset(
-                main_version=main_version,
+            version = self._get_subproject_version(
+                version_slug=main_version.slug,
                 subproject=project,
-            ).first()
+            )
+            # Fallback to the default version of the subproject.
+            if not version and project.default_version:
+                version = self._get_subproject_version(
+                    version_slug=project.default_version,
+                    subproject=project,
+                )
+
             if version and self._has_permission(self.request.user, version):
                 url = project.get_docs_url(version_slug=version.slug)
                 projects_data[project.slug] = VersionData(
@@ -243,12 +250,13 @@ class PageSearchAPIView(GenericAPIView):
         setattr(self, cache_key, projects_data)
         return projects_data
 
-    def _get_subproject_versions_queryset(self, main_version, subproject):
-        """Get a queryset with the versions from the subproject that match `main_version`."""
+    def _get_subproject_version(self, version_slug, subproject):
+        """Get a version from the subproject."""
         return (
             Version.internal
             .public(user=self.request.user, project=subproject, include_hidden=False)
-            .filter(slug=main_version.slug)
+            .filter(slug=version_slug)
+            .first()
         )
 
     def _has_permission(self, user, version):
@@ -282,22 +290,20 @@ class PageSearchAPIView(GenericAPIView):
            calling ``search.execute().hits``. This is why an DSL search object
            is compatible with DRF's paginator.
         """
-        filters = {}
-        filters['project'] = list(self._get_all_projects_data().keys())
-        filters['version'] = self._get_version().slug
+        projects = {
+            project: version.slug
+            for project, version in self._get_all_projects_data().items()
+        }
 
-        # Check to avoid searching all projects in case these filters are empty.
-        if not filters['project']:
-            log.info('Unable to find a project to search')
-            return []
-        if not filters['version']:
+        # Check to avoid searching all projects in case it's empty.
+        if not projects:
             log.info('Unable to find a version to search')
             return []
 
         query = self.request.query_params['q']
         queryset = PageSearch(
             query=query,
-            filters=filters,
+            projects=projects,
             user=self.request.user,
             # We use a permission class to control authorization
             filter_by_user=False,
